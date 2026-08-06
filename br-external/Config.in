@@ -1,5 +1,6 @@
 source "$BR2_EXTERNAL_QUT_PATH/package/bitstream-timestamp/Config.in"
 source "$BR2_EXTERNAL_QUT_PATH/package/configpl/Config.in"
+source "$BR2_EXTERNAL_QUT_PATH/package/philics-telemetry/Config.in"
 source "$BR2_EXTERNAL_QUT_PATH/package/cosmos-i2cconfig/Config.in"
 source "$BR2_EXTERNAL_QUT_PATH/package/pacpwm-config/Config.in"
 source "$BR2_EXTERNAL_QUT_PATH/package/philics-pl/Config.in"

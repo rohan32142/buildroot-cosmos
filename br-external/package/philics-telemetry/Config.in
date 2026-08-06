@@ -1,0 +1,4 @@
+config BR2_PACKAGE_PHILICS_TELEMETRY
+	bool "philics-telemetry"
+	help
+	  Telemetry streamer for PHiLICS Zynq OCM measurements (0xFFFFF000).
