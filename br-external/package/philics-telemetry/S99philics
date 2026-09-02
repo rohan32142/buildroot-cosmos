@@ -1,0 +1,39 @@
+#!/bin/sh
+# PHiLICS telemetry: mount persistent storage, advance boot counter.
+
+SD=/mnt/sd
+DEV=/dev/mmcblk0p1
+
+start() {
+    printf "Mounting %s: " "$SD"
+    mkdir -p $SD
+    if mount -t vfat $DEV $SD 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAILED"
+        return 1
+    fi
+
+    B=$(cat $SD/bootcount 2>/dev/null || echo 0)
+    case "$B" in ''|*[!0-9]*) B=0 ;; esac
+    B=$((B + 1))
+
+    echo "$B" > $SD/bootcount.tmp && sync
+    mv $SD/bootcount.tmp $SD/bootcount && sync
+
+    echo 0 > $SD/runcount.tmp && sync
+    mv $SD/runcount.tmp $SD/runcount && sync
+
+    echo "PHiLICS boot=$B (runcount reset)"
+}
+
+stop() {
+    umount $SD 2>/dev/null
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) stop; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

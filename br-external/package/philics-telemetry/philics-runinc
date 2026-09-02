@@ -1,0 +1,16 @@
+#!/bin/sh
+# Emit session ID, incrementing the per-boot run counter.
+SD=/mnt/sd
+
+R=$(cat $SD/runcount 2>/dev/null || echo 0)
+case "$R" in ''|*[!0-9]*) R=0 ;; esac
+R=$((R + 1))
+
+echo "$R" > $SD/runcount.tmp && sync
+mv $SD/runcount.tmp $SD/runcount && sync
+
+B=$(cat $SD/bootcount 2>/dev/null || echo 0)
+MAC=$(tr -d ':' < /sys/class/net/eth0/address)
+NODE=${NODE_ID:-philics-cosmos-01}
+
+echo "${B}.${R}-${MAC}-${NODE}"

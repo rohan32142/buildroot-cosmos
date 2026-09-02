@@ -8,6 +8,12 @@ endef
 
 define PHILICS_TELEMETRY_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/philics-telemetry $(TARGET_DIR)/usr/bin/philics-telemetry
+	$(INSTALL) -D -m 0755 $(PHILICS_TELEMETRY_PKGDIR)/philics-runinc $(TARGET_DIR)/usr/bin/philics-runinc
+endef
+
+define PHILICS_TELEMETRY_INSTALL_INIT_SYSV
+	$(INSTALL) -D -m 0755 $(PHILICS_TELEMETRY_PKGDIR)/S99philics \
+		$(TARGET_DIR)/etc/init.d/S99philics
 endef
 
 $(eval $(generic-package))
