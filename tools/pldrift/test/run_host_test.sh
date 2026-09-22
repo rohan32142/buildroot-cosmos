@@ -2,7 +2,7 @@
 # Host-side test of pldrift against a simulated OCM ring (no FPGA needed).
 # Run from the test/ directory: bash run_host_test.sh
 set -e
-gcc -O2 -Wall -Wextra -o pldrift_host ../package/pldrift/src/pldrift.c
+gcc -O2 -Wall -Wextra -o pldrift_host ../../../br-external/package/pldrift/src/pldrift.c
 python3 mkring.py 3275 $(( (1<<32) - 50000000 - 10000 ))
 python3 writer.py & sleep 0.3
 ./pldrift_host -m ring.bin -b 0 -i 0.25 -d 3 -o host_test.csv
