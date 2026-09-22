@@ -1,1 +1,4 @@
 *Zone.Identifier
+tools/pldrift/analysis/.venv/
+tools/pldrift/analysis/figs/
+tools/pldrift/analysis/synthetic*
