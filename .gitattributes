@@ -1,3 +1,6 @@
 S99* text eol=lf
 philics-runinc text eol=lf
 *.sh text eol=lf
+br-external/** text=auto eol=lf
+br-external/package/zrproc-firmware/** -text
+tools/** text=auto eol=lf

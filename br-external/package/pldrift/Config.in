@@ -1,0 +1,5 @@
+config BR2_PACKAGE_PLDRIFT
+	bool "pldrift"
+	help
+	  Logs the PL timestamp counter from the OCM ring buffer against
+	  CLOCK_MONOTONIC_RAW and CLOCK_REALTIME for drift measurement.
