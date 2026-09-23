@@ -14,6 +14,10 @@
  *
  * Record layout assumed: 8-byte little-endian timestamp at offset 0
  * (low word at +0, high word at +4), stride 32 bytes.
+ *
+ * Record-to-record deltas are 10000 or 10001 ticks, not a constant 10000:
+ * the carrier period averages 10000.017 ticks (1.699 ppm phase-increment
+ * deficit), so a delta within +/-1 tick of the expected value is accepted.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -32,6 +36,7 @@
 #define MAX_RECORDS  8192u
 #define FINE_LIMIT   256u
 #define MAX_RETRIES  5
+#define MAX_BRK_LOG  4u
 
 static volatile sig_atomic_t stop;
 static void on_signal(int s) { (void)s; stop = 1; }
@@ -48,10 +53,17 @@ static inline uint32_t rd32(volatile uint8_t *base, uint32_t idx, uint32_t off)
     return *(volatile uint32_t *)(base + idx * REC_STRIDE + off);
 }
 
+/* True if d is within +/-1 tick of the expected delta. */
+static inline int is_step(uint32_t d, uint32_t delta)
+{
+    return (uint32_t)(d - delta + 1u) <= 2u;
+}
+
 /* Returns head index (newest record in the snapshot) or -1 if the snapshot
- * does not contain exactly one discontinuity. */
+ * does not contain exactly one discontinuity. Reports the break count in *nb
+ * and the first MAX_BRK_LOG break indices in brk[]. */
 static int find_head(volatile uint8_t *ring, uint32_t n, uint32_t delta,
-                     uint32_t *snap)
+                     uint32_t *snap, uint32_t *nb, uint32_t *brk)
 {
     uint32_t i, breaks = 0;
     int head = -1;
@@ -61,11 +73,13 @@ static int find_head(volatile uint8_t *ring, uint32_t n, uint32_t delta,
 
     for (i = 0; i < n; i++) {
         uint32_t next = snap[(i + 1) % n];
-        if ((uint32_t)(next - snap[i]) != delta) {
+        if (!is_step(next - snap[i], delta)) {
+            if (breaks < MAX_BRK_LOG) brk[breaks] = i;
             breaks++;
             head = (int)i;
         }
     }
+    *nb = breaks;
     return breaks == 1 ? head : -1;
 }
 
@@ -111,7 +125,7 @@ static void usage(const char *p)
         "  -d SEC    duration, 0 = until Ctrl-C (default 0)\n"
         "  -b ADDR   ring base address, default 0xFFFC0000\n"
         "  -n N      records in ring, default 2048\n"
-        "  -e TICKS  expected delta between records, default 10000\n"
+        "  -e TICKS  expected delta between records (+/-1 accepted), default 10000\n"
         "  -m DEV    memory device or file, default /dev/mem\n"
         "  -T DIR    IIO dir for temperature, e.g. /sys/bus/iio/devices/iio:device0\n"
         "  -t TAG    free-text tag written to the header (session id etc.)\n", p);
@@ -167,7 +181,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    fprintf(f, "# pldrift v1 tag=%s base=0x%lX n=%u delta=%u interval=%.3f temp=%s\n",
+    fprintf(f, "# pldrift v1 tag=%s base=0x%lX n=%u delta=%u(+/-1) interval=%.3f temp=%s\n",
             tag, base, n, delta, interval, temp.ok ? tdir : "none");
     fprintf(f, "mono_raw_ns,realtime_ns,pl64,pl_lo,scan_ns,temp_mc,retries\n");
     fflush(f);
@@ -177,12 +191,19 @@ int main(int argc, char **argv)
 
     while (!stop) {
         int head = -1, tries;
+        uint32_t nb = 0, brk[MAX_BRK_LOG], k;
+
         for (tries = 0; tries < MAX_RETRIES && head < 0; tries++)
-            head = find_head(ring, n, delta, snap);
+            head = find_head(ring, n, delta, snap, &nb, brk);
 
         if (head < 0) {
             rejects++;
-            fprintf(stderr, "pldrift: no consistent head after %d tries\n", MAX_RETRIES);
+            fprintf(stderr, "pldrift: no consistent head after %d tries, %u breaks:",
+                    MAX_RETRIES, nb);
+            for (k = 0; k < nb && k < MAX_BRK_LOG; k++)
+                fprintf(stderr, " [%u] %08X->%08X", brk[k], snap[brk[k]],
+                        snap[(brk[k] + 1) % n]);
+            fputc('\n', stderr);
         } else {
             uint64_t r0 = now_ns(CLOCK_MONOTONIC_RAW);
             uint64_t w0 = now_ns(CLOCK_REALTIME);
@@ -193,7 +214,7 @@ int main(int argc, char **argv)
             while (steps < FINE_LIMIT) {
                 uint32_t nidx = (idx + 1) % n;
                 uint32_t nv = rd32(ring, nidx, 0);
-                if ((uint32_t)(nv - cur) != delta) break;
+                if (!is_step(nv - cur, delta)) break;
                 idx = nidx; cur = nv; steps++;
             }
             uint32_t hi1 = rd32(ring, idx, 4);
