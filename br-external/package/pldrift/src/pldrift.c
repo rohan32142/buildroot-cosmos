@@ -13,7 +13,7 @@
  *   mono_raw_ns,realtime_ns,pl64,pl_lo,scan_ns,temp_mc,retries
  *
  * Record layout assumed: 8-byte little-endian timestamp at offset 0
- * (low word at +0, high word at +4), stride 20 bytes.
+ * (low word at +0, high word at +4), stride 32 bytes.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -28,7 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define REC_STRIDE   20u
+#define REC_STRIDE   32u
 #define MAX_RECORDS  8192u
 #define FINE_LIMIT   256u
 #define MAX_RETRIES  5
@@ -110,7 +110,7 @@ static void usage(const char *p)
         "  -i SEC    sample interval, default 1\n"
         "  -d SEC    duration, 0 = until Ctrl-C (default 0)\n"
         "  -b ADDR   ring base address, default 0xFFFC0000\n"
-        "  -n N      records in ring, default 3276\n"
+        "  -n N      records in ring, default 2048\n"
         "  -e TICKS  expected delta between records, default 10000\n"
         "  -m DEV    memory device or file, default /dev/mem\n"
         "  -T DIR    IIO dir for temperature, e.g. /sys/bus/iio/devices/iio:device0\n"
@@ -121,7 +121,7 @@ int main(int argc, char **argv)
 {
     const char *out = NULL, *dev = "/dev/mem", *tdir = NULL, *tag = "";
     unsigned long base = 0xFFFC0000ul;
-    uint32_t n = 3276, delta = 10000;
+    uint32_t n = 2048, delta = 10000;
     double interval = 1.0, duration = 0.0;
     static uint32_t snap[MAX_RECORDS];
     struct temp_src temp;
