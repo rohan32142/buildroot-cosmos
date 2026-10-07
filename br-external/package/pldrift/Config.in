@@ -3,3 +3,7 @@ config BR2_PACKAGE_PLDRIFT
 	help
 	  Logs the PL timestamp counter from the OCM ring buffer against
 	  CLOCK_MONOTONIC_RAW and CLOCK_REALTIME for drift measurement.
+
+	  Also installs adcmon (ADC monitor), ocmsoak, and adcburst, which
+	  captures every 20 kHz sample for a fixed time into RAM and then
+	  writes it to InfluxDB v2 as line protocol over HTTP.
