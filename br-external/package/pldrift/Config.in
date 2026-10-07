@@ -7,3 +7,7 @@ config BR2_PACKAGE_PLDRIFT
 	  Also installs adcmon (ADC monitor), ocmsoak, and adcburst, which
 	  captures every 20 kHz sample for a fixed time into RAM and then
 	  writes it to InfluxDB v2 as line protocol over HTTP.
+
+	  adcscope streams a live lab view to InfluxDB: per-cycle RMS,
+	  frequency and power, a block-averaged waveform, trip register
+	  changes, and full-rate captures around trips or a manual trigger.
