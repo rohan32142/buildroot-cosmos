@@ -3,7 +3,7 @@
  * InfluxDB v2 as line protocol over HTTP.
  *
  *   adcscope [-c LIST] [-R CH] [-W V:I,...] [-r HZ] [-T PRE:POST] [-N]
- *            [-H HOST] [-P PORT] [-O ORG] [-b BUCKET] [-k TOKENFILE]
+ *            [-H HOST] [-P PORT] [-O ORG] [-b BUCKET] [-B BUCKET] [-k TOKENFILE]
  *            [-n NODE] [-s SESSION] [-f MS] [-d SEC]
  *
  * Measurements written (tags node_id and session on every point):
@@ -12,7 +12,9 @@
  *               freq, and for each V:I pair (-W) pV_I, qV_I, pfV_I.
  *               If the reference has no AC signal, 20 ms windows are used
  *               and freq/p/q/pf are left out. Also carries sts and src.
- *   wave        block-averaged waveform at -r Hz (default 1000), fields chN.
+ *   wave        block-averaged waveform at -r Hz, fields chN. The default
+ *               5 kHz (mean of 4 samples) resolves harmonics to the 50th
+ *               at 50 Hz, the range IEC power quality monitoring asks for.
  *   trip        one point whenever tripsts or tripsrc changes: sts, src,
  *               prev_sts, and string fields active and cause with bit names.
  *   burst       full-rate capture around a trip (sts going non-zero) or a
@@ -23,6 +25,9 @@
  *   scope_meta  every 10 s: queue depth, drops, missed records, HTTP
  *               results, drain-thread wake-up lateness and loop time, and
  *               the timestamp offset. Also printed to stderr.
+ * cycle, trip and scope_meta go to bucket -b; wave, burst and burst_meta
+ * go to bucket -B (default the same), which can have a short retention
+ * period since it carries most of the volume.
  * Values are in engineering units where /mnt/sd/adcmon.conf gives a gain
  * (codes per unit) for the channel, otherwise ADC codes.
  *
@@ -100,7 +105,7 @@ static void on_signal(int s) { if (s == SIGUSR1) trig_manual = 1; else stop = 1;
 /* ------------------------------------------------------------- settings */
 
 struct opts {
-    const char *dev, *conf, *host, *port, *org, *bucket, *tokfile, *node, *session;
+    const char *dev, *conf, *host, *port, *org, *bucket, *wbucket, *tokfile, *node, *session;
     char *token;
     unsigned chmask;
     int ref;
@@ -364,27 +369,35 @@ static void *drain_main(void *arg)
 
 /* -------------------------------------------------------- HTTP output */
 
-static char out_path[480];
-static char *out; static size_t out_len, out_cap;
+/* Two output streams: main (cycle, trip, scope_meta) to -b, and wave
+ * (wave, burst, burst_meta) to -B, so the high-rate data can live in a
+ * bucket with a short retention period. */
+struct sink {
+    char path[480];
+    char *buf;
+    size_t len, cap;
+    long lines;
+};
+static struct sink s_main, s_wave, *cur = &s_main;
 static uint64_t st_http_ok, st_http_fail, st_lines;
-static long out_lines;
 
-static int out_reserve(size_t more)
+static int sink_reserve(struct sink *k, size_t more)
 {
-    if (out_len + more + 1 <= out_cap) return 0;
-    size_t nc = out_cap ? out_cap : (1 << 20);
-    while (nc < out_len + more + 1) nc *= 2;
-    char *n = realloc(out, nc);
+    if (k->len + more + 1 <= k->cap) return 0;
+    size_t nc = k->cap ? k->cap : (1 << 20);
+    while (nc < k->len + more + 1) nc *= 2;
+    char *n = realloc(k->buf, nc);
     if (!n) return -1;
-    out = n; out_cap = nc;
+    k->buf = n; k->cap = nc;
     return 0;
 }
 
 #define EMIT(...) do { \
-    if (out_reserve(1024) == 0) out_len += (size_t)snprintf(out + out_len, out_cap - out_len, __VA_ARGS__); \
+    if (sink_reserve(cur, 1024) == 0) \
+        cur->len += (size_t)snprintf(cur->buf + cur->len, cur->cap - cur->len, __VA_ARGS__); \
 } while (0)
 
-static int http_post(const char *body, size_t len, char *msg, size_t msglen)
+static int http_post(const char *path, const char *body, size_t len, char *msg, size_t msglen)
 {
     struct addrinfo hints = { 0 }, *ai = NULL;
     hints.ai_family = AF_UNSPEC;
@@ -409,7 +422,7 @@ static int http_post(const char *body, size_t len, char *msg, size_t msglen)
         "POST %s HTTP/1.1\r\nHost: %s:%s\r\nAuthorization: Token %s\r\n"
         "Content-Type: text/plain; charset=utf-8\r\nAccept: application/json\r\n"
         "Content-Length: %zu\r\nConnection: close\r\n\r\n",
-        out_path, o.host, o.port, o.token, len);
+        path, o.host, o.port, o.token, len);
     const char *parts[2] = { hdr, body };
     size_t lens[2] = { (size_t)hl, len };
     for (int p = 0; p < 2; p++) {
@@ -451,28 +464,30 @@ static int http_post(const char *body, size_t len, char *msg, size_t msglen)
 
 static uint64_t last_err_ns;
 
-static void flush_out(void)
+static void flush_sink(struct sink *k)
 {
-    if (!out_len) return;
+    if (!k->len) return;
     char msg[512];
-    int st = http_post(out, out_len, msg, sizeof msg);
+    int st = http_post(k->path, k->buf, k->len, msg, sizeof msg);
     if (st < 200 || st >= 300) {
-        if (st < 0 || st >= 500) { nap_us(100000); st = http_post(out, out_len, msg, sizeof msg); }
+        if (st < 0 || st >= 500) { nap_us(100000); st = http_post(k->path, k->buf, k->len, msg, sizeof msg); }
     }
     if (st >= 200 && st < 300) {
         st_http_ok++;
-        st_lines += (uint64_t)out_lines;
+        st_lines += (uint64_t)k->lines;
     } else {
         st_http_fail++;
         uint64_t t = now_ns(CLOCK_MONOTONIC);
         if (t - last_err_ns > 5000000000ull) {
-            fprintf(stderr, "adcscope: write failed (%s%d %s); dropping %ld lines\n",
-                    st < 0 ? "error " : "HTTP ", st, msg, out_lines);
+            fprintf(stderr, "adcscope: write to bucket %s failed (%s%d %s); dropping %ld lines\n",
+                    k == &s_wave ? o.wbucket : o.bucket, st < 0 ? "error " : "HTTP ", st, msg, k->lines);
             last_err_ns = t;
         }
     }
-    out_len = 0; out_lines = 0;
+    k->len = 0; k->lines = 0;
 }
+
+static void flush_out(void) { flush_sink(&s_main); flush_sink(&s_wave); }
 
 /* ------------------------------------------------------------- worker */
 
@@ -513,6 +528,7 @@ static void emit_cycle(int valid, double period_ticks)
     size_t n = W.n;
     if (n < 2) return;
     double mean[NCH], rms[NCH];
+    cur = &s_main;
     EMIT("cycle,node_id=%s,session=%s ", T_node, T_sess);
     int first = 1;
     for (int c = 0; c < NCH; c++) {
@@ -553,7 +569,7 @@ static void emit_cycle(int valid, double period_ticks)
     EMIT(",n=%zui", n);
     if (!o.no_trip) EMIT(",sts=%ui,src=%ui", cur_sts, cur_src);
     EMIT(" %" PRId64 "\n", tns(W.ts[0]));
-    out_lines++;
+    cur->lines++;
     n_cycles++;
     W.n = 0;
 }
@@ -604,6 +620,7 @@ static void wave_sample(const struct rec *r)
     if (!dec_n) dec_ts0 = r->ts;
     for (int c = 0; c < NCH; c++) dec_sum[c] += r->code[c];
     if (++dec_n < dec) return;
+    cur = &s_wave;
     EMIT("wave,node_id=%s,session=%s ", T_node, T_sess);
     int first = 1;
     for (int c = 0; c < NCH; c++) {
@@ -612,7 +629,7 @@ static void wave_sample(const struct rec *r)
         first = 0;
     }
     EMIT(" %" PRId64 "\n", tns(dec_ts0));
-    out_lines++;
+    cur->lines++;
     memset(dec_sum, 0, sizeof dec_sum);
     dec_n = 0;
 }
@@ -645,6 +662,7 @@ static void start_capture(const char *tag)
 static void finish_capture(void)
 {
     flush_out();                           /* keep the live stream ahead of the burst */
+    cur = &s_wave;
     uint64_t miss = 0;
     for (size_t i = 0; i < cap_n; i++) {
         const struct rec *s = &cap[i];
@@ -661,15 +679,15 @@ static void finish_capture(void)
             first = 0;
         }
         EMIT(",pl=%" PRIu64 "i,sts=%ui %" PRId64 "\n", s->ts, s->sts, tns(s->ts));
-        out_lines++;
-        if (out_len > (4u << 20)) flush_out();
+        cur->lines++;
+        if (s_wave.len > (4u << 20)) flush_sink(&s_wave);
     }
     double span = cap_n > 1 ? (double)(cap[cap_n - 1].ts - cap[0].ts) / TICK_HZ : 0;
     EMIT("burst_meta,node_id=%s,session=%s,tag=%s samples=%zui,missed=%" PRIu64 "i,"
          "duration_s=%.6f,rate_hz=%.4f,chmask=%ui,first_pl=%" PRIu64 "i,offset_ns=%" PRId64 "i %" PRId64 "\n",
          T_node, T_sess, cap_tag, cap_n, miss, span, span > 0 ? (cap_n - 1) / span : 0,
          o.chmask, cap[0].ts, offset, tns(cap[0].ts));
-    out_lines++;
+    cur->lines++;
     flush_out();
     fprintf(stderr, "adcscope: %s capture written, %zu samples, %" PRIu64 " missed\n", cap_tag, cap_n, miss);
     capturing = 0;
@@ -696,9 +714,10 @@ static void trip_sample(const struct rec *r)
     char a[160], s[160];
     names(a, sizeof a, r->sts);
     names(s, sizeof s, r->src);
+    cur = &s_main;
     EMIT("trip,node_id=%s,session=%s sts=%ui,src=%ui,prev_sts=%ui,active=\"%s\",cause=\"%s\" %" PRId64 "\n",
          T_node, T_sess, r->sts, r->src, have_trip ? cur_sts : r->sts, a, s, tns(r->ts));
-    out_lines++;
+    cur->lines++;
     fprintf(stderr, "adcscope: trip status 0x%X (%s), source 0x%X (%s)\n", r->sts, a, r->src, s);
     int rising = have_trip && cur_sts == 0 && r->sts != 0;
     cur_sts = r->sts; cur_src = r->src;
@@ -714,13 +733,14 @@ static void emit_meta(uint64_t now_rt)
     uint64_t wake = __atomic_exchange_n(&st_wake_max_ns, 0, __ATOMIC_RELAXED);
     uint64_t loop = __atomic_exchange_n(&st_loop_max_ns, 0, __ATOMIC_RELAXED);
     int64_t spread = __atomic_load_n(&st_win_spread, __ATOMIC_RELAXED);
+    cur = &s_main;
     EMIT("scope_meta,node_id=%s,session=%s q_max=%" PRIu64 "i,q_drop=%" PRIu64 "i,missed=%" PRIu64 "i,"
          "http_ok=%" PRIu64 "i,http_fail=%" PRIu64 "i,lines=%" PRIu64 "i,cycles=%" PRIu64 "i,"
          "captures=%" PRIu64 "i,wake_max_us=%.1f,drain_max_us=%.1f,offset_ns=%" PRId64 "i,"
          "offset_spread_ns=%" PRId64 "i %" PRIu64 "\n",
          T_node, T_sess, qmax, drop, miss, st_http_ok, st_http_fail, st_lines, n_cycles,
          n_captures, wake / 1e3, loop / 1e3, offset, spread, now_rt);
-    out_lines++;
+    cur->lines++;
     fprintf(stderr, "adcscope: queue max %" PRIu64 ", dropped %" PRIu64 ", missed %" PRIu64
             ", posts ok %" PRIu64 " failed %" PRIu64 ", wake late max %.0f us, drain max %.0f us\n",
             qmax, drop, miss, st_http_ok, st_http_fail, wake / 1e3, loop / 1e3);
@@ -738,8 +758,8 @@ static void worker(void)
         if (!__atomic_load_n(&st_offset_valid, __ATOMIC_ACQUIRE)) { nap_us(10000); continue; }
         offset = __atomic_load_n(&st_offset, __ATOMIC_RELAXED);
         if (!started) {
-            fprintf(stderr, "adcscope: streaming to %s:%s bucket %s, session %s\n",
-                    o.host, o.port, o.bucket, o.session);
+            fprintf(stderr, "adcscope: streaming to %s:%s, buckets %s (metrics) and %s (waveform), session %s\n",
+                    o.host, o.port, o.bucket, o.wbucket, o.session);
             started = 1;
         }
         if (trig_manual) { trig_manual = 0; start_capture("manual"); }
@@ -760,7 +780,7 @@ static void worker(void)
 
         uint64_t t = now_ns(CLOCK_MONOTONIC);
         if (t >= next_meta) { emit_meta(now_ns(CLOCK_REALTIME)); next_meta = t + 10000000000ull; }
-        if (t >= next_flush || out_len > (4u << 20)) { flush_out(); next_flush = t + (uint64_t)o.flush_ms * 1000000ull; }
+        if (t >= next_flush || s_main.len + s_wave.len > (4u << 20)) { flush_out(); next_flush = t + (uint64_t)o.flush_ms * 1000000ull; }
         if (tail == head) nap_us(2000);
     }
     emit_meta(now_ns(CLOCK_REALTIME));
@@ -776,14 +796,16 @@ static void usage(void)
         "  -c LIST    channels to publish (default 0,1,2,3,4,5)\n"
         "  -R CH      reference channel for cycle detection (default: first in -c)\n"
         "  -W V:I,..  voltage:current channel pairs for P, Q and PF (default none)\n"
-        "  -r HZ      waveform rate, block-averaged; 0 = off, 20000 = every sample (default 1000)\n"
+        "  -r HZ      waveform rate, block-averaged; 0 = off, 20000 = every sample (default 5000)\n"
         "  -T PRE:POST  capture seconds before:after a trigger (default 0.5:0.5, total <= 10)\n"
         "  -N         do not read the trip registers (no trip points or trip captures)\n"
         "  -t POLLS   read trip registers every POLLS drain polls (default 10)\n"
         "  -H HOST    InfluxDB host (default 192.168.50.1)\n"
         "  -P PORT    InfluxDB port (default 8086)\n"
         "  -O ORG     org (default qut-microgrid)\n"
-        "  -b BUCKET  bucket (default telemetry)\n"
+        "  -b BUCKET  bucket for cycle, trip and scope_meta (default telemetry)\n"
+        "  -B BUCKET  bucket for wave, burst and burst_meta (default: same as -b);\n"
+        "             give it a short retention period for high waveform rates\n"
         "  -k FILE    token file (default /mnt/sd/influx.token, or $INFLUX_TOKEN)\n"
         "  -n NODE    node_id tag (default $NODE_ID or cosmos-test)\n"
         "  -s ID      session tag (default scope-<unix time>; try -s $(philics-runinc))\n"
@@ -804,12 +826,12 @@ int main(int argc, char **argv)
         .dev = "/dev/mem", .conf = "/mnt/sd/adcmon.conf", .host = "192.168.50.1", .port = "8086",
         .org = "qut-microgrid", .bucket = "telemetry", .tokfile = "/mnt/sd/influx.token",
         .node = envnode && *envnode ? envnode : "cosmos-test", .chmask = 0x3F, .ref = -1,
-        .wave_hz = 1000, .pre_s = 0.5, .post_s = 0.5, .poll_us = 1000, .flush_ms = 500,
+        .wave_hz = 5000, .pre_s = 0.5, .post_s = 0.5, .poll_us = 1000, .flush_ms = 500,
         .trip_every = 10, .prio = 50,
     };
     char sessbuf[64];
     int opt;
-    while ((opt = getopt(argc, argv, "c:R:W:r:T:Nt:H:P:O:b:k:n:s:f:d:g:m:p:q:h")) != -1) {
+    while ((opt = getopt(argc, argv, "c:R:W:r:T:Nt:H:P:O:b:B:k:n:s:f:d:g:m:p:q:h")) != -1) {
         switch (opt) {
         case 'c': o.chmask = parse_mask(optarg); break;
         case 'R': o.ref = atoi(optarg); break;
@@ -822,6 +844,7 @@ int main(int argc, char **argv)
         case 'P': o.port = optarg; break;
         case 'O': o.org = optarg; break;
         case 'b': o.bucket = optarg; break;
+        case 'B': o.wbucket = optarg; break;
         case 'k': o.tokfile = optarg; break;
         case 'n': o.node = optarg; break;
         case 's': o.session = optarg; break;
@@ -840,6 +863,7 @@ int main(int argc, char **argv)
         o.poll_us > 20000 || o.prio < 1 || o.prio > 99) {
         usage(); return 2;
     }
+    if (!o.wbucket) o.wbucket = o.bucket;
     if (o.ref < 0) for (int c = 0; c < NCH; c++) if (o.chmask & (1u << c)) { o.ref = c; break; }
     if (o.ref < 0 || o.ref >= NCH) { fprintf(stderr, "adcscope: bad -R\n"); return 2; }
     dec = o.wave_hz > 0 ? lround(REC_HZ / o.wave_hz) : 0;
@@ -862,7 +886,9 @@ int main(int argc, char **argv)
         char eo[200], eb[200];
         urlenc(eo, sizeof eo, o.org);
         urlenc(eb, sizeof eb, o.bucket);
-        snprintf(out_path, sizeof out_path, "/api/v2/write?org=%s&bucket=%s&precision=ns", eo, eb);
+        snprintf(s_main.path, sizeof s_main.path, "/api/v2/write?org=%s&bucket=%s&precision=ns", eo, eb);
+        urlenc(eb, sizeof eb, o.wbucket);
+        snprintf(s_wave.path, sizeof s_wave.path, "/api/v2/write?org=%s&bucket=%s&precision=ns", eo, eb);
     }
 
     queue = calloc(QSIZE, sizeof *queue);
@@ -870,7 +896,7 @@ int main(int argc, char **argv)
     cap_max = (size_t)((o.pre_s + o.post_s) * REC_HZ) + 64;
     hist = hist_cap ? calloc(hist_cap, sizeof *hist) : NULL;
     cap = calloc(cap_max, sizeof *cap);
-    if (!queue || (hist_cap && !hist) || !cap || out_reserve(1 << 20)) { perror("calloc"); return 1; }
+    if (!queue || (hist_cap && !hist) || !cap || sink_reserve(&s_main, 1 << 20) || sink_reserve(&s_wave, 1 << 20)) { perror("calloc"); return 1; }
     if (mlockall(MCL_CURRENT | MCL_FUTURE))
         fprintf(stderr, "adcscope: mlockall failed (%s); continuing\n", strerror(errno));
 
