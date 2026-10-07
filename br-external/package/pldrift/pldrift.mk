@@ -30,6 +30,9 @@ define PLDRIFT_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/ocmwatch.sh $(TARGET_DIR)/usr/bin/ocmwatch
 	$(INSTALL) -D -m 0755 $(@D)/labup.sh $(TARGET_DIR)/usr/bin/labup
 	$(INSTALL) -D -m 0755 $(@D)/soakrun.sh $(TARGET_DIR)/usr/bin/soakrun
+	$(INSTALL) -D -m 0755 $(@D)/pmlog.sh $(TARGET_DIR)/usr/bin/pmlog
+	$(INSTALL) -D -m 0755 $(@D)/perfrun.sh $(TARGET_DIR)/usr/bin/perfrun
+	$(INSTALL) -D -m 0755 $(@D)/labsuite.sh $(TARGET_DIR)/usr/bin/labsuite
 endef
 
 $(eval $(generic-package))

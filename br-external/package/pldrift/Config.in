@@ -11,3 +11,7 @@ config BR2_PACKAGE_PLDRIFT
 	  adcscope streams a live lab view to InfluxDB: per-cycle RMS,
 	  frequency and power, a block-averaged waveform, trip register
 	  changes, and full-rate captures around trips or a manual trigger.
+
+	  pmlog, perfrun and labsuite run the CPU1 perturbation tests:
+	  per-minute readings of the PL performance monitor, with CPU0 load
+	  and eth0 traffic, saved per run under /mnt/sd/runs.
