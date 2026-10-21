@@ -11,6 +11,6 @@ mv $SD/runcount.tmp $SD/runcount && sync
 
 B=$(cat $SD/bootcount 2>/dev/null || echo 0)
 MAC=$(tr -d ':' < /sys/class/net/eth0/address)
-NODE=${NODE_ID:-philics-cosmos-01}
+NODE=${NODE_ID:-cosmos-test}
 
 echo "${B}.${R}-${MAC}-${NODE}"
